@@ -102,6 +102,47 @@ public final class ApiDtos {
                            long unitsSold30Days, BigDecimal revenue30Days, long activeScenarios,
                            List<WarehouseSummary> warehouses, List<ProductView> lowStockProducts) {}
 
+    @Schema(description = "Read-only request for the inventory operations advisor. It never executes transfers or changes stock.")
+    public record AgentRequest(
+            @Size(max = 40) String sku,
+            Warehouse warehouse,
+            AgentScenario scenario,
+            @Size(max = 4000) String externalSignals,
+            Boolean useAi) {}
+
+    public record DemandForecast(String sku, String productName, Warehouse warehouse, int currentStock,
+                                 int reorderPoint, long unitsSold90Days, BigDecimal averageDailyDemand90Days,
+                                 BigDecimal recentTrendPercent, long forecast30Days, int coverageDays,
+                                 LocalDate projectedStockoutDate, String risk, List<String> evidence) {}
+
+    public record TransferRecommendation(String sku, String productName, Warehouse fromWarehouse,
+                                         Warehouse toWarehouse, int quantity, int routeDays, BigDecimal routeCostAed,
+                                         long destinationShortageBefore, long destinationShortageAfter,
+                                         String tradeoff, String rationale) {}
+
+    public record BusinessImpact(long shortageUnitsBefore, long shortageUnitsAfter, BigDecimal revenueAtRiskBefore,
+                                 BigDecimal revenueAtRiskAfter, long avoidedShortageUnits,
+                                 BigDecimal transferCostAed, BigDecimal netValueProtectedAed) {}
+
+    public record AgentAnalysis(Instant asOf, String mode, int historyDays, String scope,
+                                AgentScenario scenario, String externalSignals, List<DemandForecast> demandForecasts,
+                                List<TransferRecommendation> transferRecommendations,
+                                BusinessImpact businessImpact, List<String> assumptions,
+                                List<String> nextActions, String narrative) {}
+
+    @Schema(description = "Read-only question over data fetched from the application REST APIs.")
+    public record AgentChatRequest(
+            @NotBlank @Size(max = 2000) String message,
+            @NotNull Map<String, Object> context,
+            @Size(max = 12) List<@Valid AgentChatTurn> history,
+            Boolean useAi) {}
+
+    public record AgentChatTurn(@NotBlank @Pattern(regexp = "user|assistant") String role,
+                                @NotBlank @Size(max = 2000) String content) {}
+
+    public record AgentChatResponse(Instant asOf, String mode, String answer, List<String> sources,
+                                    PlanRequest planningProposal) {}
+
     public record PageView<T>(List<T> content, int page, int size, long totalElements, int totalPages) {
         public static <T> PageView<T> of(Page<T> page) {
             return new PageView<>(page.getContent(), page.getNumber(), page.getSize(), page.getTotalElements(), page.getTotalPages());

@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.*;
 import java.util.*;
+import org.hibernate.Hibernate;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -92,6 +93,7 @@ public class PlanningService {
     }
 
     private PlanView project(PlanningScenario plan) {
+        Hibernate.initialize(plan.product);
         Instant now = Instant.now();
         LocalDate today = now.atZone(UAE).toLocalDate();
         LocalDate end = today.plusDays(29);

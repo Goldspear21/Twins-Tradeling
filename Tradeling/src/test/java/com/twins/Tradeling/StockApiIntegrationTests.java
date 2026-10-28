@@ -8,11 +8,15 @@ import java.math.BigDecimal;
 import java.time.*;
 import java.util.List;
 import java.util.concurrent.*;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -39,17 +43,95 @@ class StockApiIntegrationTests {
     @Autowired InventoryService inventory;
     @Autowired PlatformTransactionManager transactions;
     @Autowired JsonMapper json;
+    @Autowired DataSource dataSource;
 
     @Test
-    void seedsTwentySkusInFiveFamiliesAndThreeWarehouses() throws Exception {
-        assertThat(products.count()).isEqualTo(20);
+    void loadsPremadeSqlRecordsInFiveFamiliesAndThreeWarehouses() throws Exception {
+        assertThat(products.count()).isEqualTo(25);
         assertThat(products.findAll().stream().map(product -> product.family).distinct().count()).isEqualTo(5);
-        assertThat(sales.count()).isEqualTo(600);
-        assertThat(transfers.count()).isEqualTo(8);
+        assertThat(products.findAll()).allSatisfy(product -> {
+            assertThat(product.stockAt(Warehouse.ABU_DHABI)).isGreaterThanOrEqualTo(0);
+            assertThat(product.stockAt(Warehouse.DUBAI)).isGreaterThanOrEqualTo(0);
+            assertThat(product.stockAt(Warehouse.SHARJAH)).isGreaterThanOrEqualTo(0);
+        });
+        assertThat(products.findById("HUB-ETH-004").orElseThrow().stockAt(Warehouse.ABU_DHABI)).isZero();
+        assertThat(sales.count()).isEqualTo(40);
+        assertThat(transfers.count()).isEqualTo(10);
+        assertThat(plans.count()).isEqualTo(8);
+        assertThat(plans.findAll()).extracting(plan -> plan.status).contains(PlanStatus.DRAFT, PlanStatus.CONFIRMED, PlanStatus.CLOSED);
         mvc.perform(get("/api/v1/products")).andExpect(status().isOk())
-                .andExpect(jsonPath("$.totalElements").value(20))
+                .andExpect(jsonPath("$.totalElements").value(25))
                 .andExpect(jsonPath("$.content[0].currency").value("AED"))
                 .andExpect(jsonPath("$.content[0].inventory.length()").value(3));
+    }
+
+    @Test
+    void submittedTextAndStockPersistWithoutGeneratedHistory() throws Exception {
+        String sku = "USER-CABLE-001";
+        mvc.perform(post("/api/v1/products").contentType(MediaType.APPLICATION_JSON).content("""
+                {"sku":"USER-CABLE-001","details":{"name":"Desk cable","family":"CABLE",
+                 "description":"Entered on the website","brand":"Local brand","unitPrice":15.50,
+                 "costPrice":8.00,"reorderPoint":2,"supplierLeadTimeDays":4},
+                 "inventory":{"abuDhabi":10,"dubai":20,"sharjah":5}}
+                """)).andExpect(status().isCreated());
+        mvc.perform(post("/api/v1/sales").contentType(MediaType.APPLICATION_JSON).content("""
+                {"sku":"USER-CABLE-001","reference":"USER-SALE-001","customer":"Textbox customer",
+                 "warehouse":"DUBAI","quantity":3,"unitPrice":14.25}
+                """)).andExpect(status().isCreated());
+        mvc.perform(post("/api/v1/replenishments").contentType(MediaType.APPLICATION_JSON).content("""
+                {"sku":"USER-CABLE-001","reference":"USER-MOVE-001","fromWarehouse":"DUBAI",
+                 "toWarehouse":"SHARJAH","quantity":4,"reason":"Textbox transfer reason"}
+                """)).andExpect(status().isCreated());
+        String result = mvc.perform(post("/api/v1/plans").contentType(MediaType.APPLICATION_JSON)
+                .content(planBody(0, null).replace(SKU, sku).replace("Test scenario", "Textbox plan")
+                        .replace("Review a branch transfer", "Textbox planning notes")))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        long id = json.readTree(result).get("id").asLong();
+
+        new ResourceDatabasePopulator(new ClassPathResource("data.sql")).execute(dataSource);
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        assertThat(jdbc.queryForObject("SELECT name FROM products WHERE sku = ?", String.class, sku)).isEqualTo("Desk cable");
+        assertThat(jdbc.queryForObject("SELECT description FROM products WHERE sku = ?", String.class, sku))
+                .isEqualTo("Entered on the website");
+        assertThat(jdbc.queryForObject("SELECT dubai_stock FROM products WHERE sku = ?", Integer.class, sku)).isEqualTo(13);
+        assertThat(jdbc.queryForObject("SELECT sharjah_stock FROM products WHERE sku = ?", Integer.class, sku)).isEqualTo(9);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sales WHERE product_sku = ?", Long.class, sku)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT customer FROM sales WHERE reference = ?", String.class, "USER-SALE-001"))
+                .isEqualTo("Textbox customer");
+        assertThat(jdbc.queryForObject("SELECT reason FROM replenishments WHERE reference = ?", String.class, "USER-MOVE-001"))
+                .isEqualTo("Textbox transfer reason");
+        assertThat(jdbc.queryForObject("SELECT action_note FROM planning_scenarios WHERE id = ?", String.class, id))
+                .isEqualTo("Textbox planning notes");
+        mvc.perform(get("/api/v1/products/" + sku)).andExpect(status().isOk()).andExpect(jsonPath("$.totalStock").value(32));
+        mvc.perform(get("/api/v1/plans/" + id)).andExpect(status().isOk()).andExpect(jsonPath("$.title").value("Textbox plan"));
+    }
+
+    @Test
+    void reapplyingSqlPreservesExistingCatalogPlansAndHistory() {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.update("UPDATE products SET name = ?, unit_price = ?, dubai_stock = ? WHERE sku = ?", "Saved edit", 83.25, 51, SKU);
+        jdbc.update("UPDATE planning_scenarios SET title = ?, action_note = ?, status = ? WHERE id = ?",
+                "Saved plan edit", "Saved notes", "CLOSED", 9001);
+        jdbc.update("UPDATE sales SET customer = ?, sold_at = ? WHERE reference = ?",
+                "Saved customer", "2026-09-01 09:00:00", "SEED-SAL-EDGE-017");
+        jdbc.update("UPDATE replenishments SET reason = ?, moved_at = ? WHERE reference = ?",
+                "Saved reason", "2026-09-02 09:00:00", "SEED-MOV-001");
+        var saleBefore = jdbc.queryForMap("SELECT * FROM sales WHERE reference = ?", "SEED-SAL-EDGE-017");
+        var transferBefore = jdbc.queryForMap("SELECT * FROM replenishments WHERE reference = ?", "SEED-MOV-001");
+        var planBefore = jdbc.queryForMap("SELECT * FROM planning_scenarios WHERE id = ?", 9001);
+
+        new ResourceDatabasePopulator(new ClassPathResource("data.sql")).execute(dataSource);
+        assertThat(jdbc.queryForObject("SELECT name FROM products WHERE sku = ?", String.class, SKU)).isEqualTo("Saved edit");
+        assertThat(jdbc.queryForObject("SELECT dubai_stock FROM products WHERE sku = ?", Integer.class, SKU)).isEqualTo(51);
+        assertThat(jdbc.queryForObject("SELECT unit_price FROM products WHERE sku = ?", BigDecimal.class, SKU))
+                .isEqualByComparingTo("83.25");
+        assertThat(jdbc.queryForMap("SELECT * FROM sales WHERE reference = ?", "SEED-SAL-EDGE-017")).isEqualTo(saleBefore);
+        assertThat(jdbc.queryForMap("SELECT * FROM replenishments WHERE reference = ?", "SEED-MOV-001")).isEqualTo(transferBefore);
+        assertThat(jdbc.queryForMap("SELECT * FROM planning_scenarios WHERE id = ?", 9001)).isEqualTo(planBefore);
+        assertThat(products.count()).isEqualTo(25);
+        assertThat(sales.count()).isEqualTo(40);
+        assertThat(transfers.count()).isEqualTo(10);
+        assertThat(plans.count()).isEqualTo(8);
     }
 
     @Test
@@ -119,11 +201,11 @@ class StockApiIntegrationTests {
     @Test
     void filtersAndPaginationAreBounded() throws Exception {
         mvc.perform(get("/api/v1/products").param("family", "MOUSE").param("size", "2"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(4)).andExpect(jsonPath("$.content.length()").value(2));
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(5)).andExpect(jsonPath("$.content.length()").value(2));
         mvc.perform(get("/api/v1/products").param("size", "201")).andExpect(status().isBadRequest());
         mvc.perform(get("/api/v1/products").param("page", "-1")).andExpect(status().isBadRequest());
-        mvc.perform(get("/api/v1/sales").param("sku", SKU).param("warehouse", "DUBAI"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(10));
+        mvc.perform(get("/api/v1/sales").param("sku", SKU).param("warehouse", "ABU_DHABI"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(1));
         mvc.perform(get("/api/v1/sales").param("from", "2026-10-20T00:00:00Z").param("to", "2026-10-19T00:00:00Z"))
                 .andExpect(status().isBadRequest());
     }

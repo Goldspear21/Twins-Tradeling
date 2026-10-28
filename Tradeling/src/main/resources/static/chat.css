@@ -287,11 +287,35 @@
   min-height: 34px;
 }
 
-.overview-assistant-actions,
+.overview-assistant-card,
 .chat-heading-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.overview-assistant-card {
+  justify-content: space-between;
+  margin-bottom: 24px;
+  padding: 21px 24px;
+  border: 1px solid #d5e8dc;
+  border-radius: var(--radius);
+  background: linear-gradient(110deg, #f0f8f2, #fff 75%);
+}
+
+.overview-assistant-card .eyebrow {
+  margin-bottom: 6px;
+  color: var(--green);
+}
+
+.overview-assistant-card h2 {
+  font-size: 16px;
+}
+
+.overview-assistant-card p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .chat-heading-actions {
@@ -529,9 +553,14 @@
 }
 
 @media (max-width: 650px) {
-  .overview-assistant-actions {
+  .overview-assistant-card {
     align-items: flex-start;
-    flex-direction: column-reverse;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .overview-assistant-card .button {
+    width: 100%;
   }
 
   .chat-heading-actions {
